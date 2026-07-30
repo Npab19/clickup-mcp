@@ -1,5 +1,9 @@
 # ClickUp MCP Server
 
+[![Build](https://github.com/Npab19/clickup-mcp/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/Npab19/clickup-mcp/actions/workflows/docker-publish.yml)
+[![Image](https://img.shields.io/badge/ghcr.io-npab19%2Fclickup--mcp-blue?logo=docker)](https://github.com/Npab19/clickup-mcp/pkgs/container/clickup-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 A multi-user MCP server for ClickUp. Each person who connects authorizes with their
 own ClickUp account, and every API call runs against **their** OAuth token — so
 ClickUp enforces their real permissions and no one can see anything through this
@@ -49,12 +53,22 @@ by grant id.
    Fill in `CLICKUP_CLIENT_ID`, `CLICKUP_CLIENT_SECRET`, `SERVER_URL`,
    `TOKEN_ENCRYPTION_KEY`, and `CLOUDFLARE_TUNNEL_TOKEN`.
 
-3. **Run**
+3. **Run** — either build from source:
 
    ```bash
    docker compose up -d --build
    curl https://your-host/health
    ```
+
+   ...or use the prebuilt image, which needs no clone:
+
+   ```bash
+   docker pull ghcr.io/npab19/clickup-mcp:latest
+   ```
+
+   Published for `linux/amd64` and `linux/arm64` on every push to `main`.
+   To use it in `docker-compose.yml`, replace `build: .` with
+   `image: ghcr.io/npab19/clickup-mcp:latest`.
 
 4. **Connect** your MCP client to `https://your-host/mcp`. It will walk you through
    the ClickUp consent screen on first use. Each additional user repeats step 4 and
