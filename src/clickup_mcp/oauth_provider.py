@@ -44,6 +44,7 @@ from clickup_mcp.constants import (
     CLICKUP_TOKEN_URL,
     HTTP_TIMEOUT,
     MCP_ACCESS_TOKEN_TTL,
+    MCP_SCOPE,
     PENDING_AUTH_TTL,
 )
 from clickup_mcp.store import Store
@@ -85,6 +86,34 @@ class ClickUpOAuthProvider(
 
     # --- authorization ------------------------------------------------------
 
+    @staticmethod
+    def _effective_scopes(
+        client: OAuthClientInformationFull, requested: list[str] | None
+    ) -> list[str]:
+        """Resolve the scopes to grant when the client asked for none.
+
+        `OAuthClientInformationFull.validate_scope(None)` returns None, so a client
+        that omits `scope` from the authorization request reaches us with no scopes
+        at all. Storing that verbatim mints an access token with `scopes=[]`, which
+        can never satisfy `required_scopes` — the OAuth dance completes, the client
+        reports success, and then every request to /mcp is rejected 403
+        insufficient_scope. That looks exactly like "authenticated, but the server
+        says needs-auth".
+
+        `ClientRegistrationOptions.default_scopes` does not help here: it only fills
+        in the client's registered `scope` at registration time and is never
+        consulted during authorization.
+
+        Clients differ on this — Claude's web client sends `scope`, the VS Code
+        client does not — so fall back to what the client registered with, then to
+        the server's own scope.
+        """
+        if requested:
+            return requested
+        if client.scope:
+            return client.scope.split()
+        return [MCP_SCOPE]
+
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
@@ -98,7 +127,7 @@ class ClickUpOAuthProvider(
                 "code_challenge": params.code_challenge,
                 "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
                 "client_id": client.client_id,
-                "scopes": params.scopes or [],
+                "scopes": self._effective_scopes(client, params.scopes),
                 "original_state": params.state,
                 "resource": params.resource,
             },
@@ -310,6 +339,16 @@ class ClickUpOAuthProvider(
         scopes: list[str],
         resource: str | None,
     ) -> OAuthToken:
+        # Belt and braces: an access token with no scopes cannot satisfy
+        # `required_scopes`, so it would authenticate and then fail every call.
+        # Nothing should reach here with an empty list, but if it does, a usable
+        # token beats a silently broken one.
+        if not scopes:
+            logger.warning(
+                "Minting a token with no requested scopes; defaulting to the server scope"
+            )
+            scopes = [MCP_SCOPE]
+
         access = f"mcp_{secrets.token_urlsafe(32)}"
         refresh = f"mcpr_{secrets.token_urlsafe(32)}"
 

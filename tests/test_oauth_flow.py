@@ -199,3 +199,69 @@ async def test_workspace_prefetch_failure_is_not_fatal(provider, client, store):
     await provider.handle_clickup_callback("code", state)
 
     assert await store.count_grants() == 1
+
+
+# --- scope resolution -------------------------------------------------------
+# Regression: a client that omits `scope` from the authorization request reaches
+# the provider with scopes=None (validate_scope(None) returns None). Stored
+# verbatim that mints an access token with scopes=[], which can never satisfy
+# AuthSettings.required_scopes — so the OAuth dance reports success and then every
+# /mcp request is rejected 403 insufficient_scope. Observed as: Claude's web client
+# worked, the VS Code client showed "needs-auth" right after authenticating.
+
+
+def _params_without_scope() -> AuthorizationParams:
+    return AuthorizationParams(
+        state="client-state",
+        scopes=None,  # the client sent no `scope` parameter
+        code_challenge="challenge-value",
+        redirect_uri=AnyHttpUrl(REDIRECT),
+        redirect_uri_provided_explicitly=True,
+    )
+
+
+@respx.mock
+async def test_client_omitting_scope_still_gets_a_usable_token(provider, client, store):
+    _mock_clickup()
+    url = await provider.authorize(client, _params_without_scope())
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["state"][0]
+    redirect = await provider.handle_clickup_callback("code", state)
+    mcp_code = urllib.parse.parse_qs(urllib.parse.urlparse(redirect).query)["code"][0]
+    auth_code = await provider.load_authorization_code(client, mcp_code)
+    token = await provider.exchange_authorization_code(client, auth_code)
+
+    issued = await provider.load_access_token(token.access_token)
+    assert issued is not None
+    assert "clickup" in issued.scopes, (
+        "token was minted with no scopes; every /mcp call would 403 insufficient_scope"
+    )
+
+
+async def test_effective_scopes_prefers_request_then_registration_then_default(provider):
+    registered = OAuthClientInformationFull(
+        redirect_uris=[AnyHttpUrl(REDIRECT)], scope="clickup extra"
+    )
+    scopeless = OAuthClientInformationFull(redirect_uris=[AnyHttpUrl(REDIRECT)])
+
+    assert provider._effective_scopes(registered, ["clickup"]) == ["clickup"]
+    assert provider._effective_scopes(registered, None) == ["clickup", "extra"]
+    assert provider._effective_scopes(registered, []) == ["clickup", "extra"]
+    assert provider._effective_scopes(scopeless, None) == ["clickup"]
+
+
+@respx.mock
+async def test_refresh_never_downgrades_to_an_unusable_empty_scope(provider, client, store):
+    _mock_clickup()
+    url = await provider.authorize(client, _params_without_scope())
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["state"][0]
+    redirect = await provider.handle_clickup_callback("code", state)
+    mcp_code = urllib.parse.parse_qs(urllib.parse.urlparse(redirect).query)["code"][0]
+    first = await provider.exchange_authorization_code(
+        client, await provider.load_authorization_code(client, mcp_code)
+    )
+
+    refresh = await provider.load_refresh_token(client, first.refresh_token)
+    second = await provider.exchange_refresh_token(client, refresh, [])
+
+    issued = await provider.load_access_token(second.access_token)
+    assert "clickup" in issued.scopes
