@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -163,8 +164,11 @@ class Store:
         async with self._connect_lock:
             if self._conn is not None:
                 return
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = await aiosqlite.connect(self._db_path)
+            try:
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = await aiosqlite.connect(self._db_path)
+            except (sqlite3.OperationalError, OSError) as exc:
+                raise StoreError(self._unwritable_message(exc)) from exc
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA foreign_keys=ON")
@@ -180,6 +184,38 @@ class Store:
             # can never observe a connection without its schema.
             self._conn = conn
             logger.info("Store ready", extra={"db_path": str(self._db_path)})
+
+    def _unwritable_message(self, exc: Exception) -> str:
+        """Turn sqlite's "unable to open database file" into something actionable.
+
+        Almost always a permissions problem on the mounted volume rather than
+        anything to do with the database: the container runs as a non-root user,
+        and if the volume's root ends up owned by root the process cannot create
+        the file. The raw traceback says none of that.
+        """
+        directory = self._db_path.parent
+        details = []
+        try:
+            details.append(f"directory exists: {directory.exists()}")
+            if directory.exists():
+                details.append(f"writable by this process: {os.access(directory, os.W_OK)}")
+                stat = directory.stat()
+                details.append(f"owned by uid {stat.st_uid}:{stat.st_gid}, mode {stat.st_mode & 0o777:o}")
+            details.append(f"running as uid {os.getuid()}:{os.getgid()}")
+        except (OSError, AttributeError):  # getuid is absent on Windows
+            pass
+
+        return (
+            f"Cannot open the database at {self._db_path} ({exc}).\n"
+            f"  {'; '.join(details)}\n"
+            "  This is usually a volume permission problem, not a corrupt database. "
+            "The container runs as a non-root user, so the mounted volume must be "
+            "writable by it. Check with:\n"
+            "    docker run --rm -v <project>_clickup-data:/data alpine ls -lan /data\n"
+            "  and if the directory is owned by root, fix it with:\n"
+            "    docker run --rm -v <project>_clickup-data:/data alpine chown -R 1000:1000 /data\n"
+            "  Set CLICKUP_DB_PATH to change the location."
+        )
 
     @staticmethod
     async def _migrate(conn: aiosqlite.Connection) -> None:

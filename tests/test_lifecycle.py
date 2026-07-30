@@ -11,6 +11,7 @@ The tests passed because their fixture called `store.connect()` by hand.
 """
 from __future__ import annotations
 
+import pytest
 from cryptography.fernet import Fernet
 
 from clickup_mcp.store import Store
@@ -67,3 +68,33 @@ def test_app_does_not_rely_on_the_fastmcp_lifespan_argument():
     source = inspect.getsource(app)
     assert "lifespan=_lifespan" not in source
     assert "streamable_http_app" in inspect.getsource(policy.GovernedFastMCP)
+
+
+async def test_unwritable_data_directory_gives_an_actionable_error(tmp_path, monkeypatch):
+    """The container failed on a fresh machine with a bare sqlite traceback that
+    named neither the cause (volume permissions) nor the fix."""
+    import sqlite3
+
+    from cryptography.fernet import Fernet
+
+    import aiosqlite
+
+    from clickup_mcp.store import StoreError
+
+    s = Store(
+        db_path=str(tmp_path / "nope" / "clickup.db"),
+        encryption_key=Fernet.generate_key().decode(),
+    )
+
+    async def boom(*a, **k):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(aiosqlite, "connect", boom)
+
+    with pytest.raises(StoreError) as excinfo:
+        await s.connect()
+
+    message = str(excinfo.value)
+    assert "volume permission problem" in message
+    assert "chown -R 1000:1000" in message      # the actual fix
+    assert "clickup.db" in message              # the path it tried
