@@ -14,6 +14,12 @@
 
 services:
   clickup-mcp:
+    # Published by CI on every push to main, for linux/amd64 and linux/arm64.
+    #   docker compose pull && docker compose up -d      <- run the published image
+    #   docker compose up -d --build                     <- build from local source
+    # `build:` is kept so the second form still works; with both keys present,
+    # `up` uses a local image if one is tagged, so `pull` is what fetches GHCR.
+    image: ghcr.io/npab19/clickup-mcp:${CLICKUP_IMAGE_TAG:-latest}
     build: .
     environment:
       - CLICKUP_CLIENT_ID=${CLICKUP_CLIENT_ID}

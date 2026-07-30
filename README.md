@@ -60,15 +60,20 @@ by grant id.
    curl https://your-host/health
    ```
 
-   ...or use the prebuilt image, which needs no clone:
+   ...or run the published image, which is what `docker-compose.yml` points at
+   by default:
 
    ```bash
-   docker pull ghcr.io/npab19/clickup-mcp:latest
+   docker compose pull && docker compose up -d
    ```
 
-   Published for `linux/amd64` and `linux/arm64` on every push to `main`.
-   To use it in `docker-compose.yml`, replace `build: .` with
-   `image: ghcr.io/npab19/clickup-mcp:latest`.
+   Published to `ghcr.io/npab19/clickup-mcp` for `linux/amd64` and `linux/arm64`
+   on every push to `main`, and pullable without authentication. Pin a specific
+   build with `CLICKUP_IMAGE_TAG=sha-<commit>` in `.env`.
+
+   Because the compose file declares both `image:` and `build:`, `up` will use a
+   locally-built image if one is tagged — run `docker compose pull` to fetch the
+   published one, or `docker compose up -d --build` to force a local build.
 
 4. **Connect** your MCP client to `https://your-host/mcp`. It will walk you through
    the ClickUp consent screen on first use. Each additional user repeats step 4 and
