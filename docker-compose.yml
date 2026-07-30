@@ -1,0 +1,49 @@
+# SERVER_URL must be the public HTTPS URL ClickUp will redirect back to —
+# the hostname routed to clickup-mcp by your Cloudflare Tunnel. The redirect URL
+# registered on the ClickUp app must match exactly: {SERVER_URL}/clickup-callback
+#
+# Cloudflare setup:
+#   1. In the Zero Trust dashboard, create a tunnel and copy its token into
+#      .env as CLOUDFLARE_TUNNEL_TOKEN.
+#   2. Add a public hostname on that tunnel pointing at http://clickup-mcp:8000.
+#   3. Set SERVER_URL in .env to https://<that hostname>.
+#
+# The clickup-data volume holds the SQLite store: OAuth client registrations,
+# MCP tokens, and Fernet-encrypted ClickUp grants. Losing it forces every user
+# to re-authorize. Back it up.
+
+services:
+  clickup-mcp:
+    build: .
+    environment:
+      - CLICKUP_CLIENT_ID=${CLICKUP_CLIENT_ID}
+      - CLICKUP_CLIENT_SECRET=${CLICKUP_CLIENT_SECRET}
+      - SERVER_URL=${SERVER_URL}
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY}
+      - CLICKUP_DB_PATH=/data/clickup.db
+      - CLICKUP_TOOL_PROFILE=${CLICKUP_TOOL_PROFILE:-core}
+      - CLICKUP_ENABLE_DESTRUCTIVE=${CLICKUP_ENABLE_DESTRUCTIVE:-false}
+      - CLICKUP_ADMIN_EMAILS=${CLICKUP_ADMIN_EMAILS:-}
+      - CLICKUP_RATE_CAPACITY=${CLICKUP_RATE_CAPACITY:-60}
+      - CLICKUP_RATE_REFILL_PER_MINUTE=${CLICKUP_RATE_REFILL_PER_MINUTE:-60}
+    expose:
+      - "8000"
+    volumes:
+      - clickup-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.3.0
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - clickup-mcp
+    restart: unless-stopped
+
+volumes:
+  clickup-data:

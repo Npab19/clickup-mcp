@@ -1,0 +1,29 @@
+[project]
+name = "clickup-mcp"
+version = "0.1.0"
+description = "Multi-user MCP server for the ClickUp API (v2 + v3)"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.26.0,<2",
+    "httpx>=0.28.1,<0.29",
+    "aiosqlite>=0.21.0,<0.22",
+    "cryptography>=44.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "respx>=0.22.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
