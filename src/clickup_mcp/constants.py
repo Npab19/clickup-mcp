@@ -24,9 +24,31 @@ MCP_SCOPE = "clickup"
 # --- Token lifetimes ---------------------------------------------------------
 # ClickUp access tokens do not expire and no refresh token is issued, so there is
 # nothing upstream to refresh. These govern only the MCP-level tokens we mint.
-MCP_ACCESS_TOKEN_TTL = 3600
+#
+# The refresh token we issue never expires, and the ClickUp grant behind it never
+# expires, so a user should never have to re-authorize once connected. The access
+# token TTL only controls how often the client has to exercise the refresh path.
 AUTH_CODE_TTL = 300
 PENDING_AUTH_TTL = 900
+
+
+def _env_seconds(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return max(60, value)
+
+
+MCP_ACCESS_TOKEN_TTL = _env_seconds("CLICKUP_ACCESS_TOKEN_TTL", 86_400)
+
+# How long a rotated refresh token keeps working after being exchanged.
+#
+# Strict single-use rotation is unforgiving: if the response is lost in flight,
+# the client retries, or two editor windows refresh concurrently, the old token
+# is already gone and the only recovery is a full re-authorization. A short
+# replay window absorbs all three without meaningfully weakening rotation.
+REFRESH_TOKEN_GRACE = _env_seconds("CLICKUP_REFRESH_GRACE", 300)
 
 # --- Rate limiting -----------------------------------------------------------
 # ClickUp's own ceiling is per token, i.e. per user: 100/min on Free, Unlimited,

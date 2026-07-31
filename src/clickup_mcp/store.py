@@ -79,7 +79,10 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     token_hash TEXT PRIMARY KEY,
     client_id  TEXT NOT NULL,
     grant_id   INTEGER NOT NULL REFERENCES clickup_grants(id) ON DELETE CASCADE,
-    scopes     TEXT NOT NULL
+    scopes     TEXT NOT NULL,
+    -- NULL while the token is current. Set when it is rotated, so the previous
+    -- token keeps working briefly and a lost response cannot strand the client.
+    expires_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -230,6 +233,12 @@ class Store:
         if "result_ref" not in columns:
             await conn.execute("ALTER TABLE audit_log ADD COLUMN result_ref TEXT")
             logger.info("Migrated audit_log: added result_ref")
+
+        async with conn.execute("PRAGMA table_info(refresh_tokens)") as cur:
+            refresh_columns = {row["name"] for row in await cur.fetchall()}
+        if "expires_at" not in refresh_columns:
+            await conn.execute("ALTER TABLE refresh_tokens ADD COLUMN expires_at REAL")
+            logger.info("Migrated refresh_tokens: added expires_at")
 
     async def close(self) -> None:
         async with self._connect_lock:
@@ -484,17 +493,38 @@ class Store:
         await self._ensure_connected()
         async with self._lock:
             async with self._db.execute(
-                "SELECT client_id, grant_id, scopes FROM refresh_tokens WHERE token_hash = ?",
+                "SELECT client_id, grant_id, scopes, expires_at FROM refresh_tokens "
+                "WHERE token_hash = ?",
                 (token_hash(token),),
             ) as cur:
                 row = await cur.fetchone()
         if row is None:
             return None
+        # expires_at is set only when the token has been rotated; NULL means live.
+        if row["expires_at"] is not None and row["expires_at"] < time.time():
+            return None
         return {
             "client_id": row["client_id"],
             "grant_id": int(row["grant_id"]),
             "scopes": json.loads(row["scopes"]),
+            "rotated": row["expires_at"] is not None,
         }
+
+    async def retire_refresh_token(self, token: str, grace_seconds: int) -> None:
+        """Rotate a refresh token, leaving it usable for a short window.
+
+        Deleting it outright means any lost response or concurrent refresh forces
+        the user to re-authorize, which for this server is the one thing that
+        should never be necessary — the ClickUp grant behind it never expires.
+        """
+        await self._ensure_connected()
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE refresh_tokens SET expires_at = ? WHERE token_hash = ? "
+                "AND expires_at IS NULL",
+                (time.time() + grace_seconds, token_hash(token)),
+            )
+            await self._db.commit()
 
     async def delete_refresh_token(self, token: str) -> None:
         await self._ensure_connected()
@@ -555,6 +585,11 @@ class Store:
             removed += cur.rowcount or 0
             cur = await self._db.execute(
                 "DELETE FROM access_tokens WHERE expires_at IS NOT NULL AND expires_at < ?", (now,)
+            )
+            removed += cur.rowcount or 0
+            cur = await self._db.execute(
+                "DELETE FROM refresh_tokens WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (now,),
             )
             removed += cur.rowcount or 0
             await self._db.commit()

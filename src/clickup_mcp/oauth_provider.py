@@ -46,6 +46,7 @@ from clickup_mcp.constants import (
     MCP_ACCESS_TOKEN_TTL,
     MCP_SCOPE,
     PENDING_AUTH_TTL,
+    REFRESH_TOKEN_GRACE,
 )
 from clickup_mcp.store import Store
 
@@ -303,10 +304,17 @@ class ClickUpOAuthProvider(
         record = await self._store.get_refresh_token(refresh_token)
         if record is None or record["client_id"] != client.client_id:
             return None
+
+        # Heal tokens minted before scope resolution was fixed. The SDK's token
+        # handler rejects a refresh whose requested scope is absent from the
+        # refresh token, so a stored [] would make the session unrecoverable
+        # without re-authorizing — the one thing this server should never require.
+        scopes = record["scopes"] or [MCP_SCOPE]
+
         return RefreshToken(
             token=refresh_token,
             client_id=record["client_id"],
-            scopes=record["scopes"],
+            scopes=scopes,
         )
 
     async def exchange_refresh_token(
@@ -329,7 +337,15 @@ class ClickUpOAuthProvider(
             scopes=scopes or refresh_token.scopes,
             resource=None,
         )
-        await self._store.delete_refresh_token(refresh_token.token)
+
+        # Retire rather than delete. If this response never reaches the client, or
+        # a second editor window refreshes at the same moment, the old token still
+        # works for a short window instead of forcing a full re-authorization.
+        await self._store.retire_refresh_token(refresh_token.token, REFRESH_TOKEN_GRACE)
+        logger.info(
+            "Refreshed MCP token",
+            extra={"grant_id": record["grant_id"], "replayed": record.get("rotated", False)},
+        )
         return token
 
     async def _issue_token_pair(

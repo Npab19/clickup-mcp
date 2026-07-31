@@ -122,7 +122,11 @@ async def test_refresh_preserves_the_clickup_binding(provider, client, store):
     assert refreshed["grant_id"] == original["grant_id"]
     assert refreshed["scopes"] == ["clickup"]
 
-    # The consumed refresh token must not be reusable.
+    # The consumed refresh token stays usable for a short grace window — see
+    # REFRESH_TOKEN_GRACE. Deleting it outright meant a lost response or a
+    # concurrent refresh forced a full re-authorization.
+    assert await provider.load_refresh_token(client, first.refresh_token) is not None
+    await _close_grace_window(store, first.refresh_token)
     assert await provider.load_refresh_token(client, first.refresh_token) is None
 
 
@@ -265,3 +269,119 @@ async def test_refresh_never_downgrades_to_an_unusable_empty_scope(provider, cli
 
     issued = await provider.load_access_token(second.access_token)
     assert "clickup" in issued.scopes
+
+
+# --- refresh durability -----------------------------------------------------
+# The ClickUp grant never expires and neither does the refresh token, so once a
+# user connects they should never have to authorize again. Strict single-use
+# rotation broke that: a lost response, a client retry, or two editor windows
+# refreshing at once left the only valid refresh token already deleted, and the
+# client fell back to a full re-authorization.
+
+
+async def _close_grace_window(store, refresh_token: str) -> None:
+    """Force a rotated refresh token's grace window shut.
+
+    retire_refresh_token() only sets expires_at when it is still NULL, so it
+    cannot be used to shorten a window it already opened.
+    """
+    from clickup_mcp.store import token_hash
+
+    await store._db.execute(
+        "UPDATE refresh_tokens SET expires_at = ? WHERE token_hash = ?",
+        (0.0, token_hash(refresh_token)),
+    )
+    await store._db.commit()
+
+
+async def _connect(provider, client):
+    """Complete one authorization and return the issued token pair."""
+    url = await provider.authorize(client, _params())
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["state"][0]
+    redirect = await provider.handle_clickup_callback("code", state)
+    code = urllib.parse.parse_qs(urllib.parse.urlparse(redirect).query)["code"][0]
+    return await provider.exchange_authorization_code(
+        client, await provider.load_authorization_code(client, code)
+    )
+
+
+@respx.mock
+async def test_a_lost_refresh_response_does_not_strand_the_client(provider, client):
+    """The client refreshes, never sees the reply, and retries with the same token."""
+    _mock_clickup()
+    first = await _connect(provider, client)
+
+    rt = await provider.load_refresh_token(client, first.refresh_token)
+    await provider.exchange_refresh_token(client, rt, [])
+
+    # Same refresh token again — as a retry would.
+    replay = await provider.load_refresh_token(client, first.refresh_token)
+    assert replay is not None, "retrying a refresh must not force re-authorization"
+    second = await provider.exchange_refresh_token(client, replay, [])
+    assert second.access_token
+
+
+@respx.mock
+async def test_concurrent_refreshes_both_succeed(provider, client, store):
+    """Two editor windows sharing one stored token refresh at the same moment."""
+    import asyncio
+
+    _mock_clickup()
+    first = await _connect(provider, client)
+    grant_id = (await store.get_access_token(first.access_token))["grant_id"]
+
+    async def refresh():
+        rt = await provider.load_refresh_token(client, first.refresh_token)
+        return await provider.exchange_refresh_token(client, rt, [])
+
+    a, b = await asyncio.gather(refresh(), refresh())
+    for token in (a, b):
+        record = await store.get_access_token(token.access_token)
+        assert record is not None and record["grant_id"] == grant_id
+
+
+@respx.mock
+async def test_retired_refresh_token_stops_working_after_the_grace_window(provider, client, store):
+    """The window is a safety net, not an indefinite second key."""
+    _mock_clickup()
+    first = await _connect(provider, client)
+    rt = await provider.load_refresh_token(client, first.refresh_token)
+    await provider.exchange_refresh_token(client, rt, [])
+
+    await _close_grace_window(store, first.refresh_token)
+    assert await provider.load_refresh_token(client, first.refresh_token) is None
+
+
+@respx.mock
+async def test_legacy_empty_scope_refresh_token_is_healed(provider, client, store):
+    """Tokens minted before the scope fix carry []. The SDK rejects a refresh whose
+    requested scope is missing from the refresh token, so without healing these the
+    user could only recover by re-authorizing."""
+    _mock_clickup()
+    first = await _connect(provider, client)
+    record = await store.get_refresh_token(first.refresh_token)
+    await store.put_refresh_token(
+        first.refresh_token, record["client_id"], record["grant_id"], []
+    )
+
+    loaded = await provider.load_refresh_token(client, first.refresh_token)
+    assert loaded.scopes == ["clickup"]
+    refreshed = await provider.exchange_refresh_token(client, loaded, ["clickup"])
+    assert (await provider.load_access_token(refreshed.access_token)).scopes == ["clickup"]
+
+
+@respx.mock
+async def test_refresh_chain_survives_many_cycles(provider, client, store):
+    """A long-lived session refreshes repeatedly; the grant must follow every hop."""
+    _mock_clickup()
+    token = await _connect(provider, client)
+    grant_id = (await store.get_access_token(token.access_token))["grant_id"]
+
+    for _ in range(10):
+        rt = await provider.load_refresh_token(client, token.refresh_token)
+        assert rt is not None
+        token = await provider.exchange_refresh_token(client, rt, [])
+
+    record = await store.get_access_token(token.access_token)
+    assert record["grant_id"] == grant_id
+    assert record["scopes"] == ["clickup"]

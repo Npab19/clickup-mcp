@@ -90,6 +90,8 @@ by grant id.
 | `SERVER_URL` | `http://localhost:8000` | **Required in production.** Must be HTTPS; the process refuses to start on a non-HTTPS non-localhost URL. |
 | `TOKEN_ENCRYPTION_KEY` | — | **Required.** Fernet key encrypting ClickUp tokens at rest. |
 | `CLICKUP_DB_PATH` | `/data/clickup.db` | SQLite store. |
+| `CLICKUP_ACCESS_TOKEN_TTL` | `86400` | Seconds an MCP access token stays valid. |
+| `CLICKUP_REFRESH_GRACE` | `300` | Seconds a rotated refresh token keeps working. |
 | `CLICKUP_TOOL_PROFILE` | `core` | `core` = phases 1–2 (89 tools). `full` = all 150. |
 | `CLICKUP_ENABLE_DESTRUCTIVE` | `false` | Expose the 20 tools that irreversibly delete content. |
 | `CLICKUP_ADMIN_EMAILS` | *(empty)* | Comma-separated ClickUp emails allowed the 20 admin tools. Empty means **nobody**. |
