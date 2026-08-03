@@ -161,14 +161,30 @@ class GovernedFastMCP(FastMCP):
 
         @asynccontextmanager
         async def combined(scope_app):
+            import asyncio
+
             from clickup_mcp.runtime import clickup, store
 
             await store.connect()
             logger.info("ClickUp MCP ready", extra=startup_report())
+
+            async def sweep_forever() -> None:
+                """Expired codes and tokens are never cleaned up otherwise."""
+                while True:
+                    await asyncio.sleep(3600)
+                    try:
+                        removed = await store.sweep_expired()
+                        if removed:
+                            logger.info("Swept expired rows", extra={"removed": removed})
+                    except Exception:
+                        logger.warning("Sweep failed", exc_info=True)
+
+            sweeper = asyncio.create_task(sweep_forever())
             try:
                 async with inner(scope_app):
                     yield
             finally:
+                sweeper.cancel()
                 await clickup.close()
                 await store.close()
 

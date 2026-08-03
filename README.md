@@ -169,7 +169,7 @@ API:
 
 ```bash
 pip install -e ".[dev]"
-pytest -q          # 549 tests
+pytest -q          # 556 tests
 ```
 
 `tests/test_isolation.py` is the gate: it proves the response cache cannot serve one

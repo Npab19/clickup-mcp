@@ -447,7 +447,21 @@ class Store:
             )
             await self._db.commit()
 
-    async def get_access_token(self, token: str) -> dict[str, Any] | None:
+    async def get_access_token(
+        self, token: str, allow_expired: bool = False
+    ) -> dict[str, Any] | None:
+        """Resolve an MCP access token.
+
+        `allow_expired` exists because expiry is an *authentication* question, and
+        authentication happens once per request in the auth middleware. Code
+        downstream of that — resolving which ClickUp grant the caller is — must not
+        re-run the check: on a long-lived streaming session the middleware does not
+        re-validate, so a second expiry check there fails a request the transport
+        still considers authenticated, and the client never learns to refresh.
+
+        Expired rows are left for `sweep_expired()` rather than deleted on read, so
+        a lookup has no destructive side effect.
+        """
         await self._ensure_connected()
         async with self._lock:
             async with self._db.execute(
@@ -458,8 +472,8 @@ class Store:
                 row = await cur.fetchone()
         if row is None:
             return None
-        if row["expires_at"] is not None and row["expires_at"] < time.time():
-            await self.delete_access_token(token)
+        expired = row["expires_at"] is not None and row["expires_at"] < time.time()
+        if expired and not allow_expired:
             return None
         return {
             "client_id": row["client_id"],
@@ -467,6 +481,7 @@ class Store:
             "scopes": json.loads(row["scopes"]),
             "resource": row["resource"],
             "expires_at": row["expires_at"],
+            "expired": expired,
         }
 
     async def delete_access_token(self, token: str) -> None:
